@@ -2,7 +2,30 @@
 
 RAHasher is a CLI utility for verifying ROM checksums [with hashing methods used by RetroAchievements](https://docs.retroachievements.org/developer-docs/game-identification.html).
 
-_(It's a copy of the same utility provided by [RALibretro](https://github.com/RetroAchievements/RALibretro), but with a bit more convenient CLI.)_
+> **About this fork** — [`nixxou/RAHasher`](https://github.com/nixxou/RAHasher) is a
+> fork of [`LeXofLeviafan/RAHasher`](https://github.com/LeXofLeviafan/RAHasher) (itself
+> a CLI-friendly copy of [`RetroAchievements/RALibretro`](https://github.com/RetroAchievements/RALibretro)).
+> It adds the ability to **read archives (`.zip`, `.rar`, `.7z`) and hash every ROM
+> inside them in memory**, with options to filter/select entries and report each
+> entry's CRC32 and size. See [Hashing archives](#hashing-archives-zip--rar--7z).
+
+## What this fork adds
+
+- **Archive hashing** — point RAHasher at a `.zip`/`.rar`/`.7z` file and it lists the
+  RetroAchievements hash of every ROM inside it, one per line. Each entry is
+  decompressed **into memory** one at a time (nothing is written to disk) via the
+  7-Zip library, so large and *solid* `.7z` sets are handled efficiently.
+- **Per-entry details** — optionally print each entry's **CRC32** (taken straight from
+  the archive, or computed when the format has none) and its **64-bit size**.
+- **Filtering / selection** — restrict by file extension, filter entry names by
+  wildcard, or process a single entry (the first one, or the first match of a priority
+  list).
+- **Zstd archives** — drop the [7-Zip-zstd](https://github.com/mcmilk/7-Zip-zstd/)
+  build of `7z.dll` next to the executable and Zstd-compressed archives work too, with
+  no rebuild.
+
+Everything else (the supported systems and the hashing algorithms themselves) is
+unchanged from upstream.
 
 ## Building RAHasher with MSYS2/Makefile
 
@@ -22,7 +45,7 @@ $ pacman -S make git zip mingw-w64-i686-gcc mingw-w64-i686-SDL2 mingw-w64-i686-g
 ### Clone the repo
 
 ```
-$ git clone --recursive --depth 1 https://github.com/LeXofLeviafan/RAHasher.git
+$ git clone --recursive --depth 1 https://github.com/nixxou/RAHasher.git
 ```
 
 ### Build
@@ -34,19 +57,31 @@ $ make -f Makefile.RAHasher HAVE_CHD=1
 
 **NOTE**: use `make` for a release build or `make DEBUG=1` for a debug build. Don't forget to run `make clean` first if switching between a release build and a debug build.
 
-## Building RALibretro with Visual Studio
+## Building RAHasher with Visual Studio
 
 ### Clone the repo
 
 ```
-> git clone --recursive --depth 1 https://github.com/LeXofLeviafan/RAHasher.git
+> git clone --recursive --depth 1 https://github.com/nixxou/RAHasher.git
 ```
 
 ### Build
 
-Load `RALibretro.sln` in Visual Studio and build it (specifically the `RAHasher` target).
+Load `RALibretro.sln` in Visual Studio and build the `RAHasher` target (e.g.
+`Release` / `x64`). The archive feature is Windows-only and links `oleaut32`
+automatically; no extra setup is required at build time. At **run time** it needs a
+`7z.dll` — see [Hashing archives](#hashing-archives-zip--rar--7z).
+
+If you cloned without `--recursive`, fetch the submodules first:
+```
+> git submodule update --init --recursive
+```
 
 ## Command Line Arguments
+
+```
+RAHasher.exe [-v] [-s systempath] [archive options] system filepath...
+```
 
 Argument|Description
 -|-
@@ -81,11 +116,15 @@ cc6fb4e13300cbe82ad024d40c06a19a game1.md
 e8d98d20cde7e224dce863078dc49e08 game2.md
 ```
 Each entry is decompressed **into memory** one at a time (nothing is written to disk),
-so large/solid `.7z` files are handled efficiently. You can combine it with `?` to
-auto-detect the system of each entry by its name, e.g. `RAHasher.exe ? games.zip`.
-Entries that are themselves archives are hashed as plain files (no recursion). The
-only exception is the **Arcade** system, for which a `.zip` keeps being hashed as the
-ROM itself (RetroAchievements hashes the archive as a whole).
+so large/solid `.7z` files are handled efficiently. Useful details:
+
+- Combine it with `?` to auto-detect the system of each entry from its name, e.g.
+  `RAHasher.exe ? games.zip`.
+- Entries that are themselves archives are hashed as plain files (**no recursion**).
+- The only exception is the **Arcade** system, for which a `.zip` keeps being hashed as
+  the ROM itself (RetroAchievements hashes the archive as a whole).
+- If an entry can't be hashed for the chosen system, its hash is shown as a row of `?`
+  so the listing stays complete.
 
 ### Archive options
 
@@ -93,30 +132,55 @@ These options go **before** the system key (like `-v`/`-s`):
 
 Option|Description
 -|-
-`--arc-details`|Also print the entry's CRC32 and size: `<hash> <crc32> <size> <name>`. The CRC32 is taken from the archive (7z/zip/rar provide it; `00000000` if the format has none).
-`--arc-calc-crc`|When the archive doesn't provide a CRC32 for an entry, compute it ourselves instead of printing `00000000`.
+`--arc-details`|Also print the entry's CRC32 and size: `<hash> <crc32> <size> <name>`. The CRC32 is read from the archive (7z/zip/rar provide it; `00000000` if the format has none). The size is in bytes (64-bit).
+`--arc-calc-crc`|When the archive doesn't provide a CRC32 for an entry, compute it ourselves instead of printing `00000000` (only meaningful together with `--arc-details`).
 `--arc-ext list`|Only process entries with one of these extensions (comma-separated, case-insensitive; leading dot optional), e.g. `--arc-ext sfc,smc`. Others are ignored.
 `--arc-filter pats`|Only process entries whose **name** matches one of the wildcard patterns.
-`--arc-priority pats`|Process only **one** entry: the first match by priority order of the patterns (pattern 1 tried first, then pattern 2, …; ties broken by archive order).
+`--arc-priority pats`|Process only **one** entry: the first match by priority order of the patterns (pattern 1 is tried first, then pattern 2, …; ties broken by archive order).
 `--arc-first`|Process only the **first** entry.
 
 `--arc-filter`, `--arc-priority` and `--arc-first` operate on the subset left by
-`--arc-ext`. Patterns are wildcards (`*` = any run, `?` = any char), matched against
-the entry's file name **case-insensitively** and anchored to the whole name (use
-`*USA*` for a substring). Separate multiple patterns with `,` — or with `,,` if a
-pattern itself contains a comma (e.g. `--arc-priority "Zelda, The*,,Mario*"`).
+`--arc-ext`. If both `--arc-priority` and `--arc-first` are given, priority wins.
 
-Examples:
+Patterns are wildcards (`*` = any run of characters, `?` = any single character),
+matched against the entry's file name **case-insensitively** and anchored to the whole
+name — use `*USA*` to match a substring. Separate multiple patterns with `,`, or with
+`,,` when a pattern itself contains a comma (e.g. names like `Zelda, The`):
+
 ```bat
-:: list crc + size of every .sfc/.smc, computing crc when missing
-RAHasher.exe --arc-details --arc-calc-crc --arc-ext sfc,smc SNES "Secret of Mana.7z"
-
-:: hash just the best regional variant present (USA preferred, then Europe, then Japan)
-RAHasher.exe --arc-ext sfc --arc-priority "*(USA)*,*(Europe)*,*(Japan)*" SNES roms.zip
+RAHasher.exe --arc-priority "Zelda, The*,,Mario*" SNES roms.zip
 ```
 
-Archive support uses the 7-Zip library (`7z.dll`), located at runtime in this order:
-`%RAHASHER_7Z_DLL%` → a `7z.dll` next to `RAHasher.exe` → the installed 7-Zip
-(`HKLM\SOFTWARE\7-Zip`, then `C:\Program Files\7-Zip`). Drop the
-[7-Zip-zstd](https://github.com/mcmilk/7-Zip-zstd/) build's `7z.dll` next to the
-executable (or point `RAHASHER_7Z_DLL` at it) to also read Zstd-compressed archives.
+#### Examples
+
+```bat
+:: list crc + size of every .sfc/.smc, computing crc when the format lacks it
+RAHasher.exe --arc-details --arc-calc-crc --arc-ext sfc,smc SNES "Secret of Mana.7z"
+```
+```
+10a894199a9adc50ff88815fd9853e19 d0176b24 2097152 Secret of Mana [USA][!!].sfc
+...
+```
+```bat
+:: hash just the best regional variant present (USA preferred, then Europe, then Japan)
+RAHasher.exe --arc-ext sfc --arc-priority "*(USA)*,*(Europe)*,*(Japan)*" SNES roms.zip
+
+:: hash only the first ROM in the archive
+RAHasher.exe --arc-first SNES roms.7z
+```
+
+### The 7-Zip library (`7z.dll`)
+
+Archive support uses the 7-Zip library at run time (no link-time dependency). The DLL
+is located in this order:
+
+1. `%RAHASHER_7Z_DLL%` — full path to a `7z.dll` of your choice
+2. a `7z.dll` sitting next to `RAHasher.exe`
+3. the installed 7-Zip from the registry (`HKLM\SOFTWARE\7-Zip`)
+4. `C:\Program Files\7-Zip\7z.dll`, then `C:\Program Files (x86)\7-Zip\7z.dll`
+5. `7z.dll` found on the system `PATH`
+
+So installing [7-Zip](https://www.7-zip.org/) is enough. To also read **Zstd**-compressed
+archives, use the [7-Zip-zstd](https://github.com/mcmilk/7-Zip-zstd/) build of `7z.dll`:
+drop it next to `RAHasher.exe` or point `RAHASHER_7Z_DLL` at it — no rebuild needed,
+since the interface is identical.
