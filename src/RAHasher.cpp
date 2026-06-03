@@ -3,12 +3,16 @@
 
 #include "RA_BuildVer.h"
 #include "Util.h"
+#include "SevenZipArchive.h"
 
 #include <rcheevos/include/rc_hash.h>
 
+#include <cctype>
 #include <memory>
 #include <stdio.h>
 #include <string.h>
+#include <string>
+#include <vector>
 
 #ifdef _WIN32
  #define WIN32_LEAN_AND_MEAN
@@ -152,12 +156,25 @@ static void usage(const char* appname)
 {
   printf("RAHasher %s\n====================\n", RA_LIBRETRO_VERSION_SHORT);
 
-  printf("Usage: %s [-v] [-s systempath] system filepath...\n", util::fileName(appname).c_str());
+  printf("Usage: %s [-v] [-s systempath] [archive options] system filepath...\n", util::fileName(appname).c_str());
   printf("\n");
   printf("  -v             (optional) enables verbose messages for debugging\n");
   printf("  -s systempath  (optional) specifies where supplementary files are stored (typically a path to RetroArch/system)\n");
   printf("  system         specifies the system key or id associated to the game (which hash algorithm to use)\n");
   printf("  filepath       specifies the path to the game file (file may include wildcards, path may not)\n");
+
+  printf("\n");
+  printf("Archive options (apply when filepath is a .zip/.rar/.7z archive; its files are\n");
+  printf("listed individually, extracted in memory and hashed - except Arcade .zip):\n");
+  printf("  --arc-details        also print '<crc32> <size>' (crc from the archive, 0 if none)\n");
+  printf("  --arc-calc-crc       if the archive has no crc for an entry, compute it instead of 0\n");
+  printf("  --arc-ext list       only process these extensions (comma-separated, case-insensitive)\n");
+  printf("  --arc-filter pats    only process entries whose name matches a wildcard pattern\n");
+  printf("  --arc-priority pats  process only the first entry by priority order of the patterns\n");
+  printf("  --arc-first          process only the first entry\n");
+  printf("                       (pats: wildcard patterns separated by ',' - or ',,' if a\n");
+  printf("                        pattern itself contains a comma. --arc-filter/-priority/-first\n");
+  printf("                        operate on the --arc-ext subset.)\n");
 
   printf("\n");
   printf(" ID Key     Group    Name\n");
@@ -225,6 +242,242 @@ static void* rhash_file_open(const char* path)
 }
 
 #define RC_CONSOLE_MAX 90
+
+/* CRC32 over a buffer (same polynomial as zip/7z); provided by miniz. */
+extern "C" unsigned long mz_crc32(unsigned long crc, const unsigned char* ptr, size_t buf_len);
+
+/* ---- archive handling options (set from the command line) -------------- */
+struct ArchiveOptions
+{
+  bool details;       /* --arc-details   : add crc32 + filesize columns       */
+  bool calcCrc;       /* --arc-calc-crc  : compute crc when the archive lacks it */
+  bool first;         /* --arc-first     : keep only the first entry           */
+  bool hasExt;        /* --arc-ext was given                                   */
+  bool hasFilter;     /* --arc-filter was given                                */
+  bool hasPriority;   /* --arc-priority was given                              */
+  std::vector<std::string> extensions; /* lowercased, leading dot, e.g. ".sfc" */
+  std::vector<std::string> filters;    /* wildcard patterns (name filter)      */
+  std::vector<std::string> priorities; /* wildcard patterns (priority order)   */
+
+  ArchiveOptions() : details(false), calcCrc(false), first(false),
+                     hasExt(false), hasFilter(false), hasPriority(false) {}
+};
+static ArchiveOptions g_arc;
+
+static std::string to_lower(std::string s)
+{
+  for (size_t i = 0; i < s.size(); ++i)
+    s[i] = (char)tolower((unsigned char)s[i]);
+  return s;
+}
+
+static std::string trim(const std::string& s)
+{
+  size_t a = 0, b = s.size();
+  while (a < b && isspace((unsigned char)s[a])) ++a;
+  while (b > a && isspace((unsigned char)s[b - 1])) --b;
+  return s.substr(a, b - a);
+}
+
+/* splits a list on ',' - but if the list itself contains ',,', it splits on ',,'
+ * instead, so single commas stay literal inside patterns (names like
+ * "Zelda, The"). Empty tokens are dropped and tokens are trimmed. */
+static std::vector<std::string> split_list(const std::string& s)
+{
+  std::string sep = (s.find(",,") != std::string::npos) ? ",," : ",";
+  std::vector<std::string> out;
+  size_t pos = 0;
+  for (;;)
+  {
+    size_t n = s.find(sep, pos);
+    std::string tok = trim((n == std::string::npos) ? s.substr(pos) : s.substr(pos, n - pos));
+    if (!tok.empty())
+      out.push_back(tok);
+    if (n == std::string::npos)
+      break;
+    pos = n + sep.size();
+  }
+  return out;
+}
+
+/* extensions: normalize each token to lowercase with a leading dot (".sfc") */
+static std::vector<std::string> parse_extensions(const std::string& s)
+{
+  std::vector<std::string> toks = split_list(s);
+  std::vector<std::string> out;
+  for (size_t i = 0; i < toks.size(); ++i)
+  {
+    std::string t = toks[i];
+    if (t[0] != '.')
+      t = "." + t;
+    out.push_back(to_lower(t));
+  }
+  return out;
+}
+
+/* case-insensitive wildcard match ('*' = any run, '?' = any char), anchored to
+ * the whole string. Use '*x*' to match a substring. */
+static bool wildcard_match_ci(const char* pat, const char* str)
+{
+  const char* star = NULL;
+  const char* ss = NULL;
+  while (*str)
+  {
+    if (*pat == '?' || tolower((unsigned char)*pat) == tolower((unsigned char)*str))
+    {
+      ++pat; ++str;
+    }
+    else if (*pat == '*')
+    {
+      star = pat++; ss = str;
+    }
+    else if (star)
+    {
+      pat = star + 1; str = ++ss;
+    }
+    else
+    {
+      return false;
+    }
+  }
+  while (*pat == '*')
+    ++pat;
+  return *pat == '\0';
+}
+
+static bool matches_any(const std::vector<std::string>& patterns, const std::string& name)
+{
+  for (size_t i = 0; i < patterns.size(); ++i)
+    if (wildcard_match_ci(patterns[i].c_str(), name.c_str()))
+      return true;
+  return false;
+}
+
+/* hashes one extracted entry held in memory and prints its result line.
+ * Without --arc-details:  "<hash> <name>"
+ * With    --arc-details:  "<hash> <crc32> <size> <name>"
+ * (a row of '?' replaces the hash on failure, to keep the listing complete) */
+static bool hash_archive_entry(int consoleId, const sevenzip::EntryInfo& info,
+                               const uint8_t* data, size_t size, int* count)
+{
+  char hash[33];
+  int ok;
+
+  if (consoleId > RC_CONSOLE_MAX)
+  {
+    /* '?' mode: detect the system per entry from its in-archive name + bytes */
+    rc_hash_iterator iterator;
+    rc_hash_initialize_iterator(&iterator, info.name.c_str(), data, size);
+    ok = rc_hash_iterate(hash, &iterator);
+    rc_hash_destroy_iterator(&iterator);
+  }
+  else
+  {
+    static const uint8_t empty = 0;
+    ok = rc_hash_generate_from_buffer(hash, consoleId, data ? data : &empty, size);
+  }
+
+  const char* hashStr = ok ? hash : "????????????????????????????????";
+
+  if (g_arc.details)
+  {
+    uint32_t crc = 0;
+    if (info.hasCrc)
+      crc = info.crc;
+    else if (g_arc.calcCrc)
+      crc = (uint32_t)mz_crc32(0, data ? data : (const unsigned char*)"", size);
+
+    printf("%s %08x %llu %s\n", hashStr, (unsigned)crc,
+           (unsigned long long)info.size, info.name.c_str());
+  }
+  else
+  {
+    printf("%s %s\n", hashStr, info.name.c_str());
+  }
+
+  if (ok)
+    ++(*count);
+  return true; /* never abort - we want every selected entry in the listing */
+}
+
+/* selects which archive entries to process, applying in order: the extension
+ * restriction, then the name filter, then the priority/first single-pick. The
+ * priority/first picks operate on the extension+name filtered subset. */
+static std::vector<uint32_t> select_archive_entries(const std::vector<sevenzip::EntryInfo>& files)
+{
+  /* 1. extension restriction + 2. name filter -> subset (archive order kept) */
+  std::vector<const sevenzip::EntryInfo*> subset;
+  for (size_t i = 0; i < files.size(); ++i)
+  {
+    const sevenzip::EntryInfo& e = files[i];
+    std::string base = util::fileNameWithExtension(e.name);
+
+    if (g_arc.hasExt)
+    {
+      std::string ext = to_lower(util::extension(base));
+      bool match = false;
+      for (size_t j = 0; j < g_arc.extensions.size(); ++j)
+        if (ext == g_arc.extensions[j]) { match = true; break; }
+      if (!match)
+        continue;
+    }
+
+    if (g_arc.hasFilter && !matches_any(g_arc.filters, base))
+      continue;
+
+    subset.push_back(&e);
+  }
+
+  /* 3. single-pick: priority order wins over first; otherwise keep all */
+  std::vector<uint32_t> result;
+  if (g_arc.hasPriority)
+  {
+    for (size_t p = 0; p < g_arc.priorities.size() && result.empty(); ++p)
+      for (size_t i = 0; i < subset.size(); ++i)
+        if (wildcard_match_ci(g_arc.priorities[p].c_str(),
+                              util::fileNameWithExtension(subset[i]->name).c_str()))
+        {
+          result.push_back(subset[i]->index);
+          break;
+        }
+  }
+  else if (g_arc.first)
+  {
+    if (!subset.empty())
+      result.push_back(subset[0]->index);
+  }
+  else
+  {
+    for (size_t i = 0; i < subset.size(); ++i)
+      result.push_back(subset[i]->index);
+  }
+  return result;
+}
+
+/* expands an archive (zip/rar/7z) and prints the hash of each selected file,
+ * extracting them one at a time in memory. returns the number of hashed files. */
+static int process_archive(int consoleId, const std::string& filePath)
+{
+  int count = 0;
+  std::string error;
+
+  sevenzip::EntryDataCallback cb =
+    [consoleId, &count](const sevenzip::EntryInfo& info, const uint8_t* data, size_t size) -> bool {
+      return hash_archive_entry(consoleId, info, data, size, &count);
+    };
+
+  if (!sevenzip::processArchive(filePath, select_archive_entries, cb, error) && count == 0)
+    fprintf(stderr, "%s\n", error.c_str());
+
+  return count;
+}
+
+/* archives are expanded into their files for every system except Arcade, where a
+ * zip _is_ the ROM (its hash is computed over the archive itself by rc_hash). */
+static bool expand_as_archive(int consoleId, const std::string& file)
+{
+  return consoleId != RC_CONSOLE_ARCADE && sevenzip::isArchiveExtension(util::extension(file));
+}
 
 static int process_file(int consoleId, const std::string& file)
 {
@@ -301,6 +554,9 @@ static int process_file(int consoleId, const std::string& file)
 
 static int process_iterated_file(int console_id, const std::string& file)
 {
+  if (expand_as_archive(console_id, file))
+    return process_archive(console_id, util::fullPath(file));
+
   int result = process_file(console_id, file);
   if (!result)
     printf("????????????????????????????????");
@@ -408,6 +664,42 @@ int main(int argc, char* argv[])
       systemDirectory = argv[++argi];
       ++argi;
     }
+    else if (strcmp(argv[argi], "--arc-details") == 0)
+    {
+      g_arc.details = true;
+      ++argi;
+    }
+    else if (strcmp(argv[argi], "--arc-calc-crc") == 0)
+    {
+      g_arc.calcCrc = true;
+      ++argi;
+    }
+    else if (strcmp(argv[argi], "--arc-first") == 0)
+    {
+      g_arc.first = true;
+      ++argi;
+    }
+    else if (strcmp(argv[argi], "--arc-ext") == 0)
+    {
+      if (argi + 1 >= argc) { usage(argv[0]); return EXIT_FAILURE; }
+      g_arc.extensions = parse_extensions(argv[++argi]);
+      g_arc.hasExt = true;
+      ++argi;
+    }
+    else if (strcmp(argv[argi], "--arc-filter") == 0)
+    {
+      if (argi + 1 >= argc) { usage(argv[0]); return EXIT_FAILURE; }
+      g_arc.filters = split_list(argv[++argi]);
+      g_arc.hasFilter = true;
+      ++argi;
+    }
+    else if (strcmp(argv[argi], "--arc-priority") == 0)
+    {
+      if (argi + 1 >= argc) { usage(argv[0]); return EXIT_FAILURE; }
+      g_arc.priorities = split_list(argv[++argi]);
+      g_arc.hasPriority = true;
+      ++argi;
+    }
     else
     {
       usage(argv[0]);
@@ -476,6 +768,11 @@ int main(int argc, char* argv[])
     if (file.find('*') != std::string::npos || file.find('?') != std::string::npos)
     {
       if (!process_files(consoleId, file))
+        return EXIT_FAILURE;
+    }
+    else if (expand_as_archive(consoleId, file))
+    {
+      if (!process_archive(consoleId, util::fullPath(file)))
         return EXIT_FAILURE;
     }
     else

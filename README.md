@@ -68,3 +68,55 @@ Finally, the full list of valid console keys/IDs will be printed along with usag
 RAHasher.exe
 ```
 The list ordering matches RetroAchievements website menu. (Also, system keys match short names from [RetroAchievents game lists](https://retroachievements.org/games), sans whitespace.)
+
+## Hashing archives (zip / rar / 7z)
+
+When `filepath` points to a `.zip`, `.rar` or `.7z` archive, RAHasher expands it and
+prints the hash of **every file it contains**, one per line, as `<hash> <name>`:
+```bat
+RAHasher.exe MD "C:\ROMS\Genesis collection.7z"
+```
+```
+cc6fb4e13300cbe82ad024d40c06a19a game1.md
+e8d98d20cde7e224dce863078dc49e08 game2.md
+```
+Each entry is decompressed **into memory** one at a time (nothing is written to disk),
+so large/solid `.7z` files are handled efficiently. You can combine it with `?` to
+auto-detect the system of each entry by its name, e.g. `RAHasher.exe ? games.zip`.
+Entries that are themselves archives are hashed as plain files (no recursion). The
+only exception is the **Arcade** system, for which a `.zip` keeps being hashed as the
+ROM itself (RetroAchievements hashes the archive as a whole).
+
+### Archive options
+
+These options go **before** the system key (like `-v`/`-s`):
+
+Option|Description
+-|-
+`--arc-details`|Also print the entry's CRC32 and size: `<hash> <crc32> <size> <name>`. The CRC32 is taken from the archive (7z/zip/rar provide it; `00000000` if the format has none).
+`--arc-calc-crc`|When the archive doesn't provide a CRC32 for an entry, compute it ourselves instead of printing `00000000`.
+`--arc-ext list`|Only process entries with one of these extensions (comma-separated, case-insensitive; leading dot optional), e.g. `--arc-ext sfc,smc`. Others are ignored.
+`--arc-filter pats`|Only process entries whose **name** matches one of the wildcard patterns.
+`--arc-priority pats`|Process only **one** entry: the first match by priority order of the patterns (pattern 1 tried first, then pattern 2, …; ties broken by archive order).
+`--arc-first`|Process only the **first** entry.
+
+`--arc-filter`, `--arc-priority` and `--arc-first` operate on the subset left by
+`--arc-ext`. Patterns are wildcards (`*` = any run, `?` = any char), matched against
+the entry's file name **case-insensitively** and anchored to the whole name (use
+`*USA*` for a substring). Separate multiple patterns with `,` — or with `,,` if a
+pattern itself contains a comma (e.g. `--arc-priority "Zelda, The*,,Mario*"`).
+
+Examples:
+```bat
+:: list crc + size of every .sfc/.smc, computing crc when missing
+RAHasher.exe --arc-details --arc-calc-crc --arc-ext sfc,smc SNES "Secret of Mana.7z"
+
+:: hash just the best regional variant present (USA preferred, then Europe, then Japan)
+RAHasher.exe --arc-ext sfc --arc-priority "*(USA)*,*(Europe)*,*(Japan)*" SNES roms.zip
+```
+
+Archive support uses the 7-Zip library (`7z.dll`), located at runtime in this order:
+`%RAHASHER_7Z_DLL%` → a `7z.dll` next to `RAHasher.exe` → the installed 7-Zip
+(`HKLM\SOFTWARE\7-Zip`, then `C:\Program Files\7-Zip`). Drop the
+[7-Zip-zstd](https://github.com/mcmilk/7-Zip-zstd/) build's `7z.dll` next to the
+executable (or point `RAHASHER_7Z_DLL` at it) to also read Zstd-compressed archives.

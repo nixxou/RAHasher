@@ -193,10 +193,12 @@
     <ClCompile Include="rcheevos\src\rhash\hash_rom.c" />
     <ClCompile Include="rcheevos\src\rhash\hash_zip.c" />
     <ClCompile Include="rcheevos\src\rhash\md5.c" />
+    <ClCompile Include="SevenZipArchive.cpp" />
     <ClCompile Include="Util.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="rcheevos\include\rhash.h" />
+    <ClInclude Include="SevenZipArchive.h" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="libchdr.vcxproj">

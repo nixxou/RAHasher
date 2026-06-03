@@ -38,8 +38,13 @@ OBJS=\
 	src/rcheevos/src/rhash/hash_zip.o \
 	src/rcheevos/src/rhash/md5.o \
 	src/Hash3DS.o \
+	src/SevenZipArchive.o \
 	src/Util.o \
 	src/RAHasher.o
+
+ifeq ($(OS),Windows_NT)
+  LIBS += -loleaut32
+endif
 
 ifdef HAVE_CHD
   OBJS += $(CHD_OBJS) \
@@ -62,7 +67,7 @@ src/RAHasher.o: src/RAHasher.cpp src/RA_BuildVer.h
 
 $(OUTDIR)/RAHasher$(EXE): $(OBJS)
 	mkdir -p $(OUTDIR)
-	$(CXX) -o $@ $+ $(LDFLAGS)
+	$(CXX) -o $@ $+ $(LDFLAGS) $(LIBS)
 
 zip: $(OUTDIR)/RAHasher$(EXE)
 	rm -f $(OUTDIR)/RAHasher-*.zip RAHasher-*.zip
