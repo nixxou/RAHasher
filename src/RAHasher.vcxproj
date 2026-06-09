@@ -215,6 +215,18 @@
       <LanguageStandard>stdcpp20</LanguageStandard>
       <AdditionalIncludeDirectories>$(ProjectDir)rvz;$(ProjectDir)libchdr\deps\zstd-1.5.6\lib;$(ProjectDir)libchdr\deps\zstd-1.5.6\lib\common;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
+    <ClCompile Include="rvz\Common\Crypto\AesImpl.cpp">
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <AdditionalIncludeDirectories>$(ProjectDir)rvz;$(ProjectDir)libchdr\deps\zstd-1.5.6\lib;$(ProjectDir)libchdr\deps\zstd-1.5.6\lib\common;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <ClCompile Include="rvz\DiscIO\VolumeWii.cpp">
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <AdditionalIncludeDirectories>$(ProjectDir)rvz;$(ProjectDir)libchdr\deps\zstd-1.5.6\lib;$(ProjectDir)libchdr\deps\zstd-1.5.6\lib\common;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <ClCompile Include="rvz\DiscIO\WiiEncryptionCache.cpp">
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <AdditionalIncludeDirectories>$(ProjectDir)rvz;$(ProjectDir)libchdr\deps\zstd-1.5.6\lib;$(ProjectDir)libchdr\deps\zstd-1.5.6\lib\common;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="rcheevos\include\rhash.h" />

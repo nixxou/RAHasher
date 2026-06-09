@@ -23,6 +23,7 @@
 #include "DiscIO/Blob.h"
 #include "DiscIO/VolumeWii.h"
 #include "DiscIO/WIACompression.h"
+#include "DiscIO/WiiEncryptionCache.h"
 
 namespace DiscIO
 {
@@ -229,6 +230,9 @@ private:
 
   const PartitionEntry* GetPartition(u64 partition_data_offset, u32* partition_first_sector) const;
 
+  static bool ApplyHashExceptions(std::span<const HashExceptionEntry> exception_list,
+                                  VolumeWii::HashBlock hash_blocks[VolumeWii::BLOCKS_PER_GROUP]);
+
   bool ReadFromGroups(u64* offset, u64* size, u8** out_ptr, u64 chunk_size, u32 sector_size,
                       u64 data_offset, u64 data_size, u32 group_index, u32 number_of_groups,
                       u32 exception_lists);
@@ -245,6 +249,7 @@ private:
   std::string m_path;
   Chunk m_cached_chunk;
   u64 m_cached_chunk_offset = std::numeric_limits<u64>::max();
+  WiiEncryptionCache m_encryption_cache;
 
   std::vector<HashExceptionEntry> m_exception_list;
   bool m_write_to_exception_list = false;

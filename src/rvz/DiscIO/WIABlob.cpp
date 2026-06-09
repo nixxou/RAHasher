@@ -25,18 +25,20 @@
 #include "Common/CommonTypes.h"
 #include "Common/Crypto/SHA1.h"
 #include "Common/Logging/Log.h"
+#include "Common/ScopeGuard.h"
 #include "Common/Swap.h"
 
 #include "DiscIO/Blob.h"
 #include "DiscIO/LaggedFibonacciGenerator.h"
 #include "DiscIO/VolumeWii.h"
 #include "DiscIO/WIACompression.h"
+#include "DiscIO/WiiEncryptionCache.h"
 
 namespace DiscIO
 {
 template <bool RVZ>
 WIARVZFileReader<RVZ>::WIARVZFileReader(File::DirectIOFile file, const std::string& path)
-    : m_file(std::move(file)), m_path(path)
+    : m_file(std::move(file)), m_path(path), m_encryption_cache(this)
 {
   m_valid = Initialize(path);
 }
@@ -297,9 +299,65 @@ bool WIARVZFileReader<RVZ>::Read(u64 offset, u64 size, u8* out_ptr)
     const DataEntry& data = it->second;
     if (data.is_partition)
     {
-      // Wii partition (encrypted) reads are out of scope for the GameCube hashing harness.
-      // WiiEncryptionCache has been removed, so we cannot service this branch.
-      return false;
+      const PartitionEntry& partition = m_partition_entries[it->second.index];
+
+      const u32 partition_first_sector = Common::swap32(partition.data_entries[0].first_sector);
+      const u64 partition_data_offset = partition_first_sector * VolumeWii::BLOCK_TOTAL_SIZE;
+
+      const u32 second_number_of_sectors =
+          Common::swap32(partition.data_entries[1].number_of_sectors);
+      const u32 partition_total_sectors =
+          second_number_of_sectors ?
+              Common::swap32(partition.data_entries[1].first_sector) - partition_first_sector +
+                  second_number_of_sectors :
+              Common::swap32(partition.data_entries[0].number_of_sectors);
+
+      for (const PartitionDataEntry& partition_data : partition.data_entries)
+      {
+        if (size == 0)
+          return true;
+
+        const u32 first_sector = Common::swap32(partition_data.first_sector);
+        const u32 number_of_sectors = Common::swap32(partition_data.number_of_sectors);
+
+        const u64 data_offset = first_sector * VolumeWii::BLOCK_TOTAL_SIZE;
+        const u64 data_size = number_of_sectors * VolumeWii::BLOCK_TOTAL_SIZE;
+
+        if (data_size == 0)
+          continue;
+
+        if (data_offset + data_size <= offset)
+          continue;
+
+        if (offset < data_offset)
+          return false;
+
+        const u64 bytes_to_read = std::min(data_size - (offset - data_offset), size);
+
+        m_exception_list.clear();
+        m_write_to_exception_list = true;
+        m_exception_list_last_group_index = std::numeric_limits<u64>::max();
+        Common::ScopeGuard guard([this] { m_write_to_exception_list = false; });
+
+        bool hash_exception_error = false;
+        if (!m_encryption_cache.EncryptGroups(
+                offset - partition_data_offset, bytes_to_read, out_ptr, partition_data_offset,
+                partition_total_sectors * VolumeWii::BLOCK_DATA_SIZE, partition.partition_key,
+                [this, &hash_exception_error](
+                    VolumeWii::HashBlock hash_blocks[VolumeWii::BLOCKS_PER_GROUP], u64 offset_) {
+                  if (!ApplyHashExceptions(m_exception_list, hash_blocks))
+                    hash_exception_error = true;
+                }))
+        {
+          return false;
+        }
+        if (hash_exception_error)
+          return false;
+
+        offset += bytes_to_read;
+        size -= bytes_to_read;
+        out_ptr += bytes_to_read;
+      }
     }
     else
     {
@@ -345,8 +403,57 @@ template <bool RVZ>
 bool WIARVZFileReader<RVZ>::ReadWiiDecrypted(u64 offset, u64 size, u8* out_ptr,
                                              u64 partition_data_offset)
 {
-  // Wii decryption is out of scope for the GameCube hashing harness.
-  return false;
+  u32 partition_first_sector;
+  const PartitionEntry* partition = GetPartition(partition_data_offset, &partition_first_sector);
+  if (!partition)
+    return false;
+
+  const u64 chunk_size = Common::swap32(m_header_2.chunk_size) * VolumeWii::BLOCK_DATA_SIZE /
+                         VolumeWii::BLOCK_TOTAL_SIZE;
+
+  for (const PartitionDataEntry& data : partition->data_entries)
+  {
+    if (size == 0)
+      return true;
+
+    const u64 data_offset =
+        (Common::swap32(data.first_sector) - partition_first_sector) * VolumeWii::BLOCK_DATA_SIZE;
+    const u64 data_size = Common::swap32(data.number_of_sectors) * VolumeWii::BLOCK_DATA_SIZE;
+
+    if (!ReadFromGroups(
+            &offset, &size, &out_ptr, chunk_size, VolumeWii::BLOCK_DATA_SIZE, data_offset, data_size,
+            Common::swap32(data.group_index), Common::swap32(data.number_of_groups),
+            std::max<u32>(1, static_cast<u32>(chunk_size / VolumeWii::GROUP_DATA_SIZE))))
+    {
+      return false;
+    }
+  }
+
+  return size == 0;
+}
+
+template <bool RVZ>
+bool WIARVZFileReader<RVZ>::ApplyHashExceptions(
+    std::span<const HashExceptionEntry> exception_list,
+    VolumeWii::HashBlock hash_blocks[VolumeWii::BLOCKS_PER_GROUP])
+{
+  for (const HashExceptionEntry& exception : exception_list)
+  {
+    const u16 offset = Common::swap16(exception.offset);
+
+    const size_t block_index = offset / VolumeWii::BLOCK_HEADER_SIZE;
+    if (block_index > VolumeWii::BLOCKS_PER_GROUP)
+      return false;
+
+    const size_t offset_in_block = offset % VolumeWii::BLOCK_HEADER_SIZE;
+    if (offset_in_block + Common::SHA1::DIGEST_LEN > VolumeWii::BLOCK_HEADER_SIZE)
+      return false;
+
+    std::memcpy(reinterpret_cast<u8*>(&hash_blocks[block_index]) + offset_in_block, &exception.hash,
+                Common::SHA1::DIGEST_LEN);
+  }
+
+  return true;
 }
 
 template <bool RVZ>

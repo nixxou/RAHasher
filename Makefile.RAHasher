@@ -49,9 +49,12 @@ endif
 # RVZ/WIA support reuses the zstd that ships with libchdr, so it is only built with HAVE_CHD.
 RVZ_OBJS = src/rvz/shim.o \
            src/rvz/HashRVZ.o \
+           src/rvz/Common/Crypto/AesImpl.o \
            src/rvz/DiscIO/LaggedFibonacciGenerator.o \
            src/rvz/DiscIO/WIACompression.o \
-           src/rvz/DiscIO/WIABlob.o
+           src/rvz/DiscIO/WIABlob.o \
+           src/rvz/DiscIO/VolumeWii.o \
+           src/rvz/DiscIO/WiiEncryptionCache.o
 
 ifdef HAVE_CHD
   OBJS += $(CHD_OBJS) \
@@ -80,6 +83,12 @@ src/rvz/DiscIO/LaggedFibonacciGenerator.o: src/rvz/DiscIO/LaggedFibonacciGenerat
 src/rvz/DiscIO/WIACompression.o: src/rvz/DiscIO/WIACompression.cpp
 	$(CXX) $(RVZ_CXXFLAGS) -c $< -o $@
 src/rvz/DiscIO/WIABlob.o: src/rvz/DiscIO/WIABlob.cpp
+	$(CXX) $(RVZ_CXXFLAGS) -c $< -o $@
+src/rvz/Common/Crypto/AesImpl.o: src/rvz/Common/Crypto/AesImpl.cpp
+	$(CXX) $(RVZ_CXXFLAGS) -c $< -o $@
+src/rvz/DiscIO/VolumeWii.o: src/rvz/DiscIO/VolumeWii.cpp
+	$(CXX) $(RVZ_CXXFLAGS) -c $< -o $@
+src/rvz/DiscIO/WiiEncryptionCache.o: src/rvz/DiscIO/WiiEncryptionCache.cpp
 	$(CXX) $(RVZ_CXXFLAGS) -c $< -o $@
 
 src/RA_BuildVer.h: .git/HEAD

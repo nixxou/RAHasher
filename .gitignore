@@ -22,7 +22,7 @@
 
 # RVZ standalone dev harness (local only, not part of the RAHasher build)
 /src/rvz/build/
-/src/rvz/build_rvz.bat
+/src/rvz/*.bat
 /src/rvz/rvz_hash_main.cpp
 
 .vscode
