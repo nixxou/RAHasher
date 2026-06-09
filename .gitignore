@@ -3,6 +3,7 @@
 *.suo
 *.user
 *.o
+*.obj
 *.res
 *.swp
 *.log
@@ -12,6 +13,16 @@
 /bin
 /bin64
 /obj
+/src/bin
+/src/bin64
+/src/obj
+/release
+/RAHasher-1.8.1-x64
 /src/RA_BuildVer.h
+
+# RVZ standalone dev harness (local only, not part of the RAHasher build)
+/src/rvz/build/
+/src/rvz/build_rvz.bat
+/src/rvz/rvz_hash_main.cpp
 
 .vscode

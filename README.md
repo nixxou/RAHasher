@@ -8,6 +8,9 @@ RAHasher is a CLI utility for verifying ROM checksums [with hashing methods used
 > It adds the ability to **read archives (`.zip`, `.rar`, `.7z`) and hash every ROM
 > inside them in memory**, with options to filter/select entries and report each
 > entry's CRC32 and size. See [Hashing archives](#hashing-archives-zip--rar--7z).
+> It also adds **RVZ/WIA disc-image support** so GameCube discs stored in Dolphin's
+> compressed format can be hashed directly. See
+> [Hashing RVZ/WIA disc images](#hashing-rvzwia-disc-images).
 
 ## What this fork adds
 
@@ -23,6 +26,11 @@ RAHasher is a CLI utility for verifying ROM checksums [with hashing methods used
 - **Zstd archives** — drop the [7-Zip-zstd](https://github.com/mcmilk/7-Zip-zstd/)
   build of `7z.dll` next to the executable and Zstd-compressed archives work too, with
   no rebuild.
+- **RVZ/WIA disc images** — hash GameCube discs stored as Dolphin's compressed `.rvz`
+  (or the older `.wia`) format directly, without converting them back to `.iso`. The
+  image is decompressed on the fly, so the hash matches the one for the original disc.
+  Currently **GameCube only** (Wii is planned); RVZ files using the **Zstd** codec are
+  supported. See [Hashing RVZ/WIA disc images](#hashing-rvzwia-disc-images).
 
 Everything else (the supported systems and the hashing algorithms themselves) is
 unchanged from upstream.
@@ -103,6 +111,35 @@ Finally, the full list of valid console keys/IDs will be printed along with usag
 RAHasher.exe
 ```
 The list ordering matches RetroAchievements website menu. (Also, system keys match short names from [RetroAchievents game lists](https://retroachievements.org/games), sans whitespace.)
+
+## Hashing RVZ/WIA disc images
+
+RAHasher can hash GameCube discs stored in Dolphin's compressed **RVZ** (or the older
+**WIA**) format directly — no need to convert them back to `.iso`/`.gcm` first:
+
+```bat
+RAHasher.exe GC "Luigi's Mansion (Europe).rvz"
+```
+
+The image is decompressed on the fly, so RAHasher sees it exactly as it would the
+original disc and produces the same RetroAchievements hash. You can also let RAHasher
+detect the console straight from the RVZ header:
+
+```bat
+RAHasher.exe ? "Luigi's Mansion (Europe).rvz"
+```
+
+**Scope of this version:**
+
+- **GameCube** is supported. **Wii** RVZ images are recognised (the right console is
+  reported) but not yet hashed — planned for a later release.
+- Only the **Zstd** compression codec (the RVZ default) is supported. Images compressed
+  with LZMA/LZMA2/bzip2 are rejected rather than silently mis-hashed.
+
+The reader is a read-only port of Dolphin's `DiscIO` RVZ/WIA decompression, wired into
+rcheevos through a custom file reader. It reuses the Zstd that ships with CHD support,
+so it is built with `HAVE_CHD=1` for the Makefile build (always enabled in the Visual
+Studio build).
 
 ## Hashing archives (zip / rar / 7z)
 

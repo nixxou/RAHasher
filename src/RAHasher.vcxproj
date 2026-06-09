@@ -56,7 +56,7 @@
       </PrecompiledHeader>
       <WarningLevel>Level3</WarningLevel>
       <Optimization>Disabled</Optimization>
-      <PreprocessorDefinitions>WIN32;_DEBUG;_CONSOLE;HAVE_CHD;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>WIN32;_DEBUG;_CONSOLE;HAVE_CHD;HAVE_RVZ;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)RAInterface;$(ProjectDir)miniz;$(ProjectDir)libchdr\include;$(ProjectDir)rcheevos\include</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
@@ -83,7 +83,7 @@
       </PrecompiledHeader>
       <WarningLevel>Level3</WarningLevel>
       <Optimization>Disabled</Optimization>
-      <PreprocessorDefinitions>_DEBUG;_CONSOLE;HAVE_CHD;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>_DEBUG;_CONSOLE;HAVE_CHD;HAVE_RVZ;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)RAInterface;$(ProjectDir)miniz;$(ProjectDir)libchdr\include;$(ProjectDir)rcheevos\include</AdditionalIncludeDirectories>
     </ClCompile>
@@ -115,7 +115,7 @@
       <Optimization>MaxSpeed</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
-      <PreprocessorDefinitions>WIN32;NDEBUG;_CONSOLE;HAVE_CHD;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>WIN32;NDEBUG;_CONSOLE;HAVE_CHD;HAVE_RVZ;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)RAInterface;$(ProjectDir)miniz;$(ProjectDir)libchdr\include;$(ProjectDir)rcheevos\include</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
@@ -146,7 +146,7 @@
       <Optimization>MaxSpeed</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
-      <PreprocessorDefinitions>NDEBUG;_CONSOLE;HAVE_CHD;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>NDEBUG;_CONSOLE;HAVE_CHD;HAVE_RVZ;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)RAInterface;$(ProjectDir)miniz;$(ProjectDir)libchdr\include;$(ProjectDir)rcheevos\include</AdditionalIncludeDirectories>
     </ClCompile>
@@ -195,6 +195,26 @@
     <ClCompile Include="rcheevos\src\rhash\md5.c" />
     <ClCompile Include="SevenZipArchive.cpp" />
     <ClCompile Include="Util.cpp" />
+    <ClCompile Include="rvz\shim.cpp">
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <AdditionalIncludeDirectories>$(ProjectDir)rvz;$(ProjectDir)libchdr\deps\zstd-1.5.6\lib;$(ProjectDir)libchdr\deps\zstd-1.5.6\lib\common;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <ClCompile Include="rvz\DiscIO\LaggedFibonacciGenerator.cpp">
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <AdditionalIncludeDirectories>$(ProjectDir)rvz;$(ProjectDir)libchdr\deps\zstd-1.5.6\lib;$(ProjectDir)libchdr\deps\zstd-1.5.6\lib\common;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <ClCompile Include="rvz\DiscIO\WIACompression.cpp">
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <AdditionalIncludeDirectories>$(ProjectDir)rvz;$(ProjectDir)libchdr\deps\zstd-1.5.6\lib;$(ProjectDir)libchdr\deps\zstd-1.5.6\lib\common;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <ClCompile Include="rvz\DiscIO\WIABlob.cpp">
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <AdditionalIncludeDirectories>$(ProjectDir)rvz;$(ProjectDir)libchdr\deps\zstd-1.5.6\lib;$(ProjectDir)libchdr\deps\zstd-1.5.6\lib\common;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <ClCompile Include="rvz\HashRVZ.cpp">
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <AdditionalIncludeDirectories>$(ProjectDir)rvz;$(ProjectDir)libchdr\deps\zstd-1.5.6\lib;$(ProjectDir)libchdr\deps\zstd-1.5.6\lib\common;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="rcheevos\include\rhash.h" />

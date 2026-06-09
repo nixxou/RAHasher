@@ -36,6 +36,11 @@
 void rc_hash_init_chd_cdreader(); /* in HashCHD.cpp */
 #endif
 
+#ifdef HAVE_RVZ
+void rc_hash_init_rvz_filereader(); /* in rvz/HashRVZ.cpp */
+int  rc_hash_rvz_detect_console(const char* path); /* in rvz/HashRVZ.cpp */
+#endif
+
 void   initHash3DS(const std::string& systemDir); /* in Hash3DS.cpp */
 
 static const char* _NINTENDO = "Nintendo";
@@ -487,6 +492,19 @@ static int process_file(int consoleId, const std::string& file)
   std::string filePath = util::fullPath(file);
   std::string ext = util::extension(file);
 
+#ifdef HAVE_RVZ
+  /* RVZ/WIA are GameCube/Wii only; when no console was specified ("?"), identify it from the
+   * disc header so the correct hash algorithm runs instead of falling back to a full-file hash. */
+  if (consoleId > RC_CONSOLE_MAX && ext.length() == 4 &&
+      ((tolower(ext[1]) == 'r' && tolower(ext[2]) == 'v' && tolower(ext[3]) == 'z') ||
+       (tolower(ext[1]) == 'w' && tolower(ext[2]) == 'i' && tolower(ext[3]) == 'a')))
+  {
+    const int detected = rc_hash_rvz_detect_console(filePath.c_str());
+    if (detected)
+      consoleId = detected;
+  }
+#endif
+
   if (consoleId != RC_CONSOLE_ARCADE && consoleId <= RC_CONSOLE_MAX && ext.length() == 4 &&
       tolower(ext[1]) == 'z' && tolower(ext[2]) == 'i' && tolower(ext[3]) == 'p')
   {
@@ -521,6 +539,15 @@ static int process_file(int consoleId, const std::string& file)
       return 0;
 #endif
     }
+#ifdef HAVE_RVZ
+    else if (ext.length() == 4 &&
+             ((tolower(ext[1]) == 'r' && tolower(ext[2]) == 'v' && tolower(ext[3]) == 'z') ||
+              (tolower(ext[1]) == 'w' && tolower(ext[2]) == 'i' && tolower(ext[3]) == 'a')))
+    {
+      /* RVZ/WIA disc images: decompressed on the fly so rc_hash sees a plain ISO (GameCube). */
+      rc_hash_init_rvz_filereader();
+    }
+#endif
     else
     {
       rc_hash_init_default_cdreader();
