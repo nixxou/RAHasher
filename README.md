@@ -159,6 +159,17 @@ so large/solid `.7z` files are handled efficiently. Useful details:
 
 - Combine it with `?` to auto-detect the system of each entry from its name, e.g.
   `RAHasher.exe ? games.zip`.
+- **Disc images**: if the archive contains a `.cue`, it is treated as a CD image —
+  the `.cue` and the track files it references (`.bin`, …) are extracted into memory
+  and hashed together, producing the disc's hash (same as hashing the `.cue` on disk).
+  Loose files (readme, scans, …) and the track files themselves are not hashed
+  individually. Multiple `.cue` files give one hash each.
+  ```bat
+  RAHasher.exe PS1 "Rayman.7z"
+  ```
+  ```
+  c6ff8745d23b4c666622b26ba2022e1f Rayman.cue
+  ```
 - Entries that are themselves archives are hashed as plain files (**no recursion**).
 - The only exception is the **Arcade** system, for which a `.zip` keeps being hashed as
   the ROM itself (RetroAchievements hashes the archive as a whole).

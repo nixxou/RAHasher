@@ -31,11 +31,14 @@ namespace sevenzip
     bool        hasCrc;  /* whether the archive provided a CRC32 for this entry */
   };
 
-  /* Given every file entry in the archive, return the indices to actually extract
-   * (e.g. after filtering by extension/name or picking one by priority). */
-  typedef std::function<std::vector<uint32_t>(const std::vector<EntryInfo>&)> EntrySelector;
+  /* an entry extracted fully into memory */
+  struct ExtractedEntry
+  {
+    EntryInfo            info;
+    std::vector<uint8_t> data;
+  };
 
-  /* Invoked once per extracted file, with its metadata and decompressed bytes held
+  /* Invoked once per streamed entry, with its metadata and decompressed bytes held
    * in memory. Return false to abort the extraction. */
   typedef std::function<bool(const EntryInfo& info, const uint8_t* data, size_t size)> EntryDataCallback;
 
@@ -43,10 +46,33 @@ namespace sevenzip
    * archive format we expand into its individual files. Case-insensitive. */
   bool isArchiveExtension(const std::string& extWithDot);
 
-  /* Opens the archive at `path`, enumerates its file entries, lets `select` choose
-   * which ones to extract, then decompresses those into memory one at a time and
-   * invokes `cb` for each. Returns true if the archive could be opened and iterated
-   * (even if `select` returned nothing). On failure sets `error`. */
-  bool processArchive(const std::string& path, const EntrySelector& select,
-                      const EntryDataCallback& cb, std::string& error);
+  /* An opened archive: enumerate its entries once, then extract any subset of them
+   * (possibly several times) without re-opening. Create with open(); delete to close. */
+  class Archive
+  {
+  public:
+    /* Opens and enumerates the archive. Returns NULL on failure (sets `error`). */
+    static Archive* open(const std::string& path, std::string& error);
+    ~Archive();
+
+    /* All file entries (directories excluded), in archive order. */
+    const std::vector<EntryInfo>& entries() const { return _entries; }
+
+    /* Decompress the given indices one at a time, streaming each through `cb`
+     * (only one entry resides in memory at once). Indices are sorted/deduped. */
+    bool extract(const std::vector<uint32_t>& indices, const EntryDataCallback& cb, std::string& error);
+
+    /* Decompress the given indices fully into memory, appending one ExtractedEntry
+     * per index to `out` (all kept resident - use for a .cue plus its tracks). */
+    bool extractOwned(const std::vector<uint32_t>& indices, std::vector<ExtractedEntry>& out, std::string& error);
+
+  private:
+    Archive();
+    Archive(const Archive&);
+    Archive& operator=(const Archive&);
+
+    void* _archive;  /* IInArchive*      */
+    void* _stream;   /* IInStream* (file) */
+    std::vector<EntryInfo> _entries;
+  };
 }

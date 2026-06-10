@@ -21,6 +21,7 @@ keeps no source dependency on the SDK - only the runtime 7z.dll is required.
 #include <cstring>
 #include <new>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #pragma comment(lib, "oleaut32.lib")
@@ -260,6 +261,10 @@ namespace
     }
   };
 
+  /* the decompressed bytes of one entry are handed to the sink by move, so the
+   * caller can either consume them transiently or take ownership */
+  typedef std::function<bool(const sevenzip::EntryInfo&, std::vector<uint8_t>&&)> InternalSink;
+
   /* ---- extract callback: hands each file to the sink once decompressed ---
    * Entry metadata (name/size/crc) comes from the prior enumeration pass, keyed
    * by archive index, so GetStream() doesn't need to query the archive again. */
@@ -267,14 +272,14 @@ namespace
   {
     LONG _ref;
     const std::unordered_map<uint32_t, sevenzip::EntryInfo>* _info; /* borrowed */
-    const sevenzip::EntryDataCallback& _sink;
+    const InternalSink& _sink;
     std::vector<uint8_t> _data;           /* bytes of the current entry */
     uint32_t _curIndex;                   /* archive index of the current entry */
     bool _hasStream;                      /* current item produced a stream */
     bool _aborted;                        /* sink asked to stop */
   public:
     CMemExtractCallback(const std::unordered_map<uint32_t, sevenzip::EntryInfo>* info,
-                        const sevenzip::EntryDataCallback& sink)
+                        const InternalSink& sink)
       : _ref(1), _info(info), _sink(sink), _curIndex(0), _hasStream(false), _aborted(false) {}
 
     bool aborted() const { return _aborted; }
@@ -336,7 +341,7 @@ namespace
         std::unordered_map<uint32_t, sevenzip::EntryInfo>::const_iterator it = _info->find(_curIndex);
         if (it != _info->end())
         {
-          if (!_sink(it->second, _data.empty() ? NULL : _data.data(), _data.size()))
+          if (!_sink(it->second, std::move(_data)))
             _aborted = true;
         }
       }
@@ -461,12 +466,92 @@ namespace sevenzip
         || _stricmp(extWithDot.c_str(), ".7z")  == 0
         || _stricmp(extWithDot.c_str(), ".rar") == 0;
   }
+}
 
-  bool processArchive(const std::string& path, const EntrySelector& select,
-                      const EntryDataCallback& cb, std::string& error)
+namespace
+{
+  /* reads one entry's metadata into `e`; returns false for directories */
+  bool readEntry(IInArchive* archive, UInt32 idx, sevenzip::EntryInfo& e)
+  {
+    PROPVARIANT prop;
+
+    memset(&prop, 0, sizeof(prop));
+    bool isDir = (archive->GetProperty(idx, kpidIsDir, &prop) == S_OK
+                  && prop.vt == VT_BOOL && prop.boolVal != VARIANT_FALSE);
+    clearProp(prop);
+    if (isDir)
+      return false;
+
+    e.index = idx; e.size = 0; e.crc = 0; e.hasCrc = false;
+
+    memset(&prop, 0, sizeof(prop));
+    if (archive->GetProperty(idx, kpidPath, &prop) == S_OK && prop.vt == VT_BSTR && prop.bstrVal)
+      e.name = wideToUtf8(prop.bstrVal);
+    clearProp(prop);
+
+    memset(&prop, 0, sizeof(prop));
+    if (archive->GetProperty(idx, kpidSize, &prop) == S_OK)
+    {
+      if (prop.vt == VT_UI8)      e.size = prop.uhVal.QuadPart;
+      else if (prop.vt == VT_UI4) e.size = prop.ulVal;
+    }
+    clearProp(prop);
+
+    memset(&prop, 0, sizeof(prop));
+    if (archive->GetProperty(idx, kpidCRC, &prop) == S_OK && prop.vt == VT_UI4)
+    {
+      e.crc = prop.ulVal; e.hasCrc = true;
+    }
+    clearProp(prop);
+
+    return true;
+  }
+
+  /* runs IInArchive::Extract over the (sorted/deduped) indices, routing each
+   * decompressed entry to `sink`. */
+  bool extractIndices(IInArchive* archive, const std::vector<sevenzip::EntryInfo>& entries,
+                      std::vector<uint32_t> indices, const InternalSink& sink, std::string& error)
+  {
+    std::sort(indices.begin(), indices.end());
+    indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
+    if (indices.empty())
+      return true;
+
+    std::unordered_map<uint32_t, sevenzip::EntryInfo> infoMap;
+    infoMap.reserve(entries.size());
+    for (size_t k = 0; k < entries.size(); ++k)
+      infoMap[entries[k].index] = entries[k];
+
+    CMemExtractCallback* cb = new (std::nothrow) CMemExtractCallback(&infoMap, sink);
+    if (!cb) { error = "out of memory"; return false; }
+
+    HRESULT hr = archive->Extract(indices.data(), (UInt32)indices.size(), 0, cb);
+    bool aborted = cb->aborted();
+    cb->Release();
+
+    if (hr != S_OK && !aborted)
+    {
+      error = "extraction failed";
+      return false;
+    }
+    return true;
+  }
+}
+
+namespace sevenzip
+{
+  Archive::Archive() : _archive(NULL), _stream(NULL) {}
+
+  Archive::~Archive()
+  {
+    if (_archive) { ((IInArchive*)_archive)->Close(); ((IInArchive*)_archive)->Release(); }
+    if (_stream)  { ((IInStream*)_stream)->Release(); }
+  }
+
+  Archive* Archive::open(const std::string& path, std::string& error)
   {
     if (!ensureLoaded(error))
-      return false;
+      return NULL;
 
     std::vector<Byte> formats;
     candidateFormats(path, formats);
@@ -479,14 +564,14 @@ namespace sevenzip
         continue;
 
       CFileInStream* fileStream = new (std::nothrow) CFileInStream();
-      if (!fileStream) { archive->Release(); error = "out of memory"; return false; }
+      if (!fileStream) { archive->Release(); error = "out of memory"; return NULL; }
 
       if (!fileStream->open(path))
       {
         fileStream->Release();
         archive->Release();
         error = "could not open file: " + path;
-        return false;   /* file-level failure - no point trying other formats */
+        return NULL;   /* file-level failure - no point trying other formats */
       }
 
       const UInt64 scanSize = 1 << 23;   /* tolerate SFX / prefixed archives */
@@ -499,92 +584,53 @@ namespace sevenzip
         continue;        /* wrong format - try the next candidate */
       }
 
-      /* ---- pass 1: enumerate the file entries (metadata only) ---- */
+      Archive* self = new (std::nothrow) Archive();
+      if (!self)
+      {
+        archive->Close();
+        fileStream->Release();
+        archive->Release();
+        error = "out of memory";
+        return NULL;
+      }
+      self->_archive = archive;
+      self->_stream = static_cast<IInStream*>(fileStream);
+
+      /* enumerate the file entries (metadata only) */
       UInt32 numItems = 0;
       archive->GetNumberOfItems(&numItems);
-
-      std::vector<EntryInfo> files;
-      files.reserve(numItems);
+      self->_entries.reserve(numItems);
       for (UInt32 idx = 0; idx < numItems; ++idx)
       {
-        PROPVARIANT prop;
-
-        memset(&prop, 0, sizeof(prop));
-        bool isDir = (archive->GetProperty(idx, kpidIsDir, &prop) == S_OK
-                      && prop.vt == VT_BOOL && prop.boolVal != VARIANT_FALSE);
-        clearProp(prop);
-        if (isDir)
-          continue;
-
         EntryInfo e;
-        e.index = idx; e.size = 0; e.crc = 0; e.hasCrc = false;
-
-        memset(&prop, 0, sizeof(prop));
-        if (archive->GetProperty(idx, kpidPath, &prop) == S_OK && prop.vt == VT_BSTR && prop.bstrVal)
-          e.name = wideToUtf8(prop.bstrVal);
-        clearProp(prop);
-
-        memset(&prop, 0, sizeof(prop));
-        if (archive->GetProperty(idx, kpidSize, &prop) == S_OK)
-        {
-          if (prop.vt == VT_UI8)      e.size = prop.uhVal.QuadPart;
-          else if (prop.vt == VT_UI4) e.size = prop.ulVal;
-        }
-        clearProp(prop);
-
-        memset(&prop, 0, sizeof(prop));
-        if (archive->GetProperty(idx, kpidCRC, &prop) == S_OK && prop.vt == VT_UI4)
-        {
-          e.crc = prop.ulVal; e.hasCrc = true;
-        }
-        clearProp(prop);
-
-        files.push_back(e);
+        if (readEntry(archive, idx, e))
+          self->_entries.push_back(e);
       }
-
-      /* ---- let the caller choose which entries to extract ---- */
-      std::vector<uint32_t> indices = select(files);
-      std::sort(indices.begin(), indices.end());
-      indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
-
-      bool ok = true;
-      if (!indices.empty())
-      {
-        std::unordered_map<uint32_t, EntryInfo> infoMap;
-        infoMap.reserve(files.size());
-        for (size_t k = 0; k < files.size(); ++k)
-          infoMap[files[k].index] = files[k];
-
-        CMemExtractCallback* extractCb = new (std::nothrow) CMemExtractCallback(&infoMap, cb);
-        if (!extractCb)
-        {
-          archive->Close();
-          fileStream->Release();
-          archive->Release();
-          error = "out of memory";
-          return false;
-        }
-
-        /* ---- pass 2: decompress only the selected entries, into memory ---- */
-        hr = archive->Extract(indices.data(), (UInt32)indices.size(), 0, extractCb);
-        bool aborted = extractCb->aborted();
-        extractCb->Release();
-
-        if (hr != S_OK && !aborted)
-        {
-          error = "extraction failed for: " + path;
-          ok = false;
-        }
-      }
-
-      archive->Close();
-      fileStream->Release();
-      archive->Release();
-      return ok;
+      return self;
     }
 
     error = "unrecognized or unsupported archive format: " + path;
-    return false;
+    return NULL;
+  }
+
+  bool Archive::extract(const std::vector<uint32_t>& indices, const EntryDataCallback& cb, std::string& error)
+  {
+    InternalSink sink = [&cb](const EntryInfo& info, std::vector<uint8_t>&& data) -> bool {
+      return cb(info, data.empty() ? NULL : data.data(), data.size());
+    };
+    return extractIndices((IInArchive*)_archive, _entries, indices, sink, error);
+  }
+
+  bool Archive::extractOwned(const std::vector<uint32_t>& indices, std::vector<ExtractedEntry>& out, std::string& error)
+  {
+    InternalSink sink = [&out](const EntryInfo& info, std::vector<uint8_t>&& data) -> bool {
+      ExtractedEntry ee;
+      ee.info = info;
+      ee.data = std::move(data);
+      out.push_back(std::move(ee));
+      return true;
+    };
+    return extractIndices((IInArchive*)_archive, _entries, indices, sink, error);
   }
 }
 
@@ -599,7 +645,19 @@ namespace sevenzip
         || strcasecmp(extWithDot.c_str(), ".rar") == 0;
   }
 
-  bool processArchive(const std::string&, const EntrySelector&, const EntryDataCallback&, std::string& error)
+  Archive::Archive() : _archive(NULL), _stream(NULL) {}
+  Archive::~Archive() {}
+  Archive* Archive::open(const std::string&, std::string& error)
+  {
+    error = "archive extraction via 7z.dll is only supported on Windows";
+    return NULL;
+  }
+  bool Archive::extract(const std::vector<uint32_t>&, const EntryDataCallback&, std::string& error)
+  {
+    error = "archive extraction via 7z.dll is only supported on Windows";
+    return false;
+  }
+  bool Archive::extractOwned(const std::vector<uint32_t>&, std::vector<ExtractedEntry>&, std::string& error)
   {
     error = "archive extraction via 7z.dll is only supported on Windows";
     return false;

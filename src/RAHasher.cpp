@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #ifdef _WIN32
@@ -405,75 +406,305 @@ static bool hash_archive_entry(int consoleId, const sevenzip::EntryInfo& info,
   return true; /* never abort - we want every selected entry in the listing */
 }
 
-/* selects which archive entries to process, applying in order: the extension
- * restriction, then the name filter, then the priority/first single-pick. The
- * priority/first picks operate on the extension+name filtered subset. */
-static std::vector<uint32_t> select_archive_entries(const std::vector<sevenzip::EntryInfo>& files)
+/* ---------------- in-memory filesystem for .cue/.bin disc images ----------
+ * rcheevos hashes a CD by reading the .cue and its track files through a global
+ * "filereader". We point that filereader at archive entries kept in memory, so a
+ * .cue inside an archive (plus its tracks) is hashed without ever touching disk. */
+namespace memfs
 {
-  /* 1. extension restriction + 2. name filter -> subset (archive order kept) */
-  std::vector<const sevenzip::EntryInfo*> subset;
-  for (size_t i = 0; i < files.size(); ++i)
-  {
-    const sevenzip::EntryInfo& e = files[i];
-    std::string base = util::fileNameWithExtension(e.name);
+  struct File   { const uint8_t* data; size_t size; };
+  struct Handle { const uint8_t* data; size_t size; int64_t pos; };
 
+  static std::unordered_map<std::string, File> g_files; /* key: lowercased basename */
+
+  static std::string baseLower(const char* path)
+  {
+    std::string s(path ? path : "");
+    size_t slash = s.find_last_of("/\\");
+    if (slash != std::string::npos)
+      s = s.substr(slash + 1);
+    return to_lower(s);
+  }
+
+  static void* RC_CCONV open_cb(const char* path)
+  {
+    std::unordered_map<std::string, File>::iterator it = g_files.find(baseLower(path));
+    if (it == g_files.end())
+      return NULL;
+    Handle* h = new (std::nothrow) Handle();
+    if (h) { h->data = it->second.data; h->size = it->second.size; h->pos = 0; }
+    return h;
+  }
+  static void RC_CCONV seek_cb(void* fh, int64_t offset, int origin)
+  {
+    Handle* h = (Handle*)fh;
+    if (origin == SEEK_SET)      h->pos = offset;
+    else if (origin == SEEK_CUR) h->pos += offset;
+    else if (origin == SEEK_END) h->pos = (int64_t)h->size + offset;
+  }
+  static int64_t RC_CCONV tell_cb(void* fh) { return ((Handle*)fh)->pos; }
+  static size_t RC_CCONV read_cb(void* fh, void* buffer, size_t bytes)
+  {
+    Handle* h = (Handle*)fh;
+    if (h->pos < 0 || (uint64_t)h->pos >= h->size)
+      return 0;
+    size_t avail = h->size - (size_t)h->pos;
+    size_t n = bytes < avail ? bytes : avail;
+    memcpy(buffer, h->data + (size_t)h->pos, n);
+    h->pos += (int64_t)n;
+    return n;
+  }
+  static void RC_CCONV close_cb(void* fh) { delete (Handle*)fh; }
+
+  static void install()
+  {
+    struct rc_hash_filereader fr;
+    memset(&fr, 0, sizeof(fr));
+    fr.open = open_cb; fr.seek = seek_cb; fr.tell = tell_cb; fr.read = read_cb; fr.close = close_cb;
+    rc_hash_init_custom_filereader(&fr);
+    rc_hash_init_default_cdreader();
+  }
+}
+
+/* extracts the filenames referenced by FILE lines of a .cue (as written) */
+static std::vector<std::string> parse_cue_files(const uint8_t* data, size_t size)
+{
+  std::vector<std::string> out;
+  std::string text((const char*)data, size);
+  size_t i = 0;
+  while (i < text.size())
+  {
+    size_t eol = text.find('\n', i);
+    std::string line = text.substr(i, (eol == std::string::npos ? text.size() : eol) - i);
+    i = (eol == std::string::npos) ? text.size() : eol + 1;
+
+    size_t s = line.find_first_not_of(" \t\r");
+    if (s == std::string::npos || strncasecmp(line.c_str() + s, "FILE", 4) != 0)
+      continue;
+    size_t p = s + 4;
+    while (p < line.size() && (line[p] == ' ' || line[p] == '\t')) ++p;
+
+    std::string name;
+    if (p < line.size() && line[p] == '"')
+    {
+      size_t q = line.find('"', p + 1);
+      if (q == std::string::npos) continue;
+      name = line.substr(p + 1, q - (p + 1));
+    }
+    else
+    {
+      size_t q = p;
+      while (q < line.size() && line[q] != ' ' && line[q] != '\t' && line[q] != '\r') ++q;
+      name = line.substr(p, q - p);
+    }
+    if (!name.empty())
+      out.push_back(name);
+  }
+  return out;
+}
+
+static bool is_cue_name(const std::string& name)
+{
+  return strcasecmp(util::extension(util::fileNameWithExtension(name)).c_str(), ".cue") == 0;
+}
+
+/* a thing to hash: either a standalone ROM entry, or a .cue disc (cue + tracks) */
+struct ArchiveUnit
+{
+  bool isCue;
+  uint32_t index;                 /* cue or rom entry index */
+  std::string name;               /* full in-archive path (display + filtering) */
+  std::vector<uint32_t> tracks;   /* cue: referenced track entry indices */
+};
+
+/* applies --arc-ext, --arc-filter, --arc-priority/-first to the units */
+static std::vector<size_t> select_units(const std::vector<ArchiveUnit>& units)
+{
+  std::vector<size_t> subset;
+  for (size_t i = 0; i < units.size(); ++i)
+  {
+    std::string base = util::fileNameWithExtension(units[i].name);
     if (g_arc.hasExt)
     {
       std::string ext = to_lower(util::extension(base));
-      bool match = false;
+      bool m = false;
       for (size_t j = 0; j < g_arc.extensions.size(); ++j)
-        if (ext == g_arc.extensions[j]) { match = true; break; }
-      if (!match)
-        continue;
+        if (ext == g_arc.extensions[j]) { m = true; break; }
+      if (!m) continue;
     }
-
     if (g_arc.hasFilter && !matches_any(g_arc.filters, base))
       continue;
-
-    subset.push_back(&e);
+    subset.push_back(i);
   }
 
-  /* 3. single-pick: priority order wins over first; otherwise keep all */
-  std::vector<uint32_t> result;
+  std::vector<size_t> result;
   if (g_arc.hasPriority)
   {
     for (size_t p = 0; p < g_arc.priorities.size() && result.empty(); ++p)
-      for (size_t i = 0; i < subset.size(); ++i)
+      for (size_t k = 0; k < subset.size(); ++k)
         if (wildcard_match_ci(g_arc.priorities[p].c_str(),
-                              util::fileNameWithExtension(subset[i]->name).c_str()))
+                              util::fileNameWithExtension(units[subset[k]].name).c_str()))
         {
-          result.push_back(subset[i]->index);
+          result.push_back(subset[k]);
           break;
         }
   }
   else if (g_arc.first)
   {
     if (!subset.empty())
-      result.push_back(subset[0]->index);
+      result.push_back(subset[0]);
   }
   else
   {
-    for (size_t i = 0; i < subset.size(); ++i)
-      result.push_back(subset[i]->index);
+    result = subset;
   }
   return result;
 }
 
-/* expands an archive (zip/rar/7z) and prints the hash of each selected file,
- * extracting them one at a time in memory. returns the number of hashed files. */
-static int process_archive(int consoleId, const std::string& filePath)
+/* hashes one .cue disc image entirely from memory (cue + its track files), via
+ * rcheevos' default cdreader pointed at the in-memory filereader. */
+static bool hash_cue_unit(int consoleId, sevenzip::Archive* arc, const ArchiveUnit& unit, int* count)
 {
-  int count = 0;
+  std::vector<uint32_t> need;
+  need.push_back(unit.index);
+  for (size_t i = 0; i < unit.tracks.size(); ++i)
+    need.push_back(unit.tracks[i]);
+
+  std::vector<sevenzip::ExtractedEntry> owned;
   std::string error;
-
-  sevenzip::EntryDataCallback cb =
-    [consoleId, &count](const sevenzip::EntryInfo& info, const uint8_t* data, size_t size) -> bool {
-      return hash_archive_entry(consoleId, info, data, size, &count);
-    };
-
-  if (!sevenzip::processArchive(filePath, select_archive_entries, cb, error) && count == 0)
+  if (!arc->extractOwned(need, owned, error))
     fprintf(stderr, "%s\n", error.c_str());
 
+  /* register every extracted file by basename for the filereader */
+  memfs::g_files.clear();
+  std::string cueName;
+  for (size_t i = 0; i < owned.size(); ++i)
+  {
+    memfs::File f;
+    f.data = owned[i].data.data();
+    f.size = owned[i].data.size();
+    memfs::g_files[memfs::baseLower(owned[i].info.name.c_str())] = f;
+    if (owned[i].info.index == unit.index)
+      cueName = util::fileNameWithExtension(owned[i].info.name);
+  }
+
+  char hash[33];
+  int ok = 0;
+  if (!cueName.empty())
+  {
+    if (consoleId > RC_CONSOLE_MAX)
+    {
+      rc_hash_iterator iterator;
+      rc_hash_initialize_iterator(&iterator, cueName.c_str(), NULL, 0);
+      ok = rc_hash_iterate(hash, &iterator);
+      rc_hash_destroy_iterator(&iterator);
+    }
+    else
+    {
+      ok = rc_hash_generate_from_file(hash, consoleId, cueName.c_str());
+    }
+  }
+
+  printf("%s %s\n", ok ? hash : "????????????????????????????????", unit.name.c_str());
+  memfs::g_files.clear();
+  if (ok) ++(*count);
+  return true;
+}
+
+/* expands an archive: hashes each ROM, and treats a .cue as a single disc image
+ * (cue + its track files), everything in memory. returns the number hashed. */
+static int process_archive(int consoleId, const std::string& filePath)
+{
+  std::string error;
+  sevenzip::Archive* arc = sevenzip::Archive::open(filePath, error);
+  if (!arc)
+  {
+    fprintf(stderr, "%s\n", error.c_str());
+    return 0;
+  }
+
+  const std::vector<sevenzip::EntryInfo>& entries = arc->entries();
+  int count = 0;
+
+  /* basename(lowercased) -> entry index, for resolving cue track references */
+  std::unordered_map<std::string, uint32_t> byBase;
+  std::vector<uint32_t> cueIndices;
+  for (size_t i = 0; i < entries.size(); ++i)
+  {
+    byBase[memfs::baseLower(entries[i].name.c_str())] = entries[i].index;
+    if (is_cue_name(entries[i].name))
+      cueIndices.push_back(entries[i].index);
+  }
+
+  std::vector<ArchiveUnit> units;
+
+  /* cue units: extract the cues, parse them, resolve their track files */
+  if (!cueIndices.empty())
+  {
+    std::vector<sevenzip::ExtractedEntry> cues;
+    if (!arc->extractOwned(cueIndices, cues, error))
+      fprintf(stderr, "%s\n", error.c_str());
+
+    for (size_t i = 0; i < cues.size(); ++i)
+    {
+      ArchiveUnit u;
+      u.isCue = true;
+      u.index = cues[i].info.index;
+      u.name = cues[i].info.name;
+
+      std::vector<std::string> refs = parse_cue_files(cues[i].data.data(), cues[i].data.size());
+      for (size_t r = 0; r < refs.size(); ++r)
+      {
+        std::unordered_map<std::string, uint32_t>::iterator it = byBase.find(memfs::baseLower(refs[r].c_str()));
+        if (it != byBase.end())
+          u.tracks.push_back(it->second);
+      }
+      units.push_back(u);
+    }
+  }
+
+  /* If the archive holds a .cue, treat it as a disc image: only the cue(s) are
+   * hashed (their tracks and any loose files like readme/scans are ignored).
+   * Otherwise every entry is a standalone ROM unit (multi-rom archive). */
+  if (cueIndices.empty())
+  {
+    for (size_t i = 0; i < entries.size(); ++i)
+    {
+      ArchiveUnit u;
+      u.isCue = false;
+      u.index = entries[i].index;
+      u.name = entries[i].name;
+      units.push_back(u);
+    }
+  }
+
+  std::vector<size_t> selected = select_units(units);
+
+  if (!cueIndices.empty())
+    memfs::install();   /* point rcheevos at the in-memory filereader for the cues */
+
+  /* cue units one disc at a time, then ROM units in one batched streaming pass */
+  std::vector<uint32_t> romIndices;
+  for (size_t s = 0; s < selected.size(); ++s)
+  {
+    const ArchiveUnit& u = units[selected[s]];
+    if (u.isCue)
+      hash_cue_unit(consoleId, arc, u, &count);
+    else
+      romIndices.push_back(u.index);
+  }
+
+  if (!romIndices.empty())
+  {
+    sevenzip::EntryDataCallback cb =
+      [consoleId, &count](const sevenzip::EntryInfo& info, const uint8_t* data, size_t size) -> bool {
+        return hash_archive_entry(consoleId, info, data, size, &count);
+      };
+    if (!arc->extract(romIndices, cb, error) && count == 0)
+      fprintf(stderr, "%s\n", error.c_str());
+  }
+
+  delete arc;
   return count;
 }
 
