@@ -14,6 +14,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <chrono>
 
 #ifdef _WIN32
  #define WIN32_LEAN_AND_MEAN
@@ -173,6 +174,8 @@ static void usage(const char* appname)
   printf("Archive options (apply when filepath is a .zip/.rar/.7z archive; its files are\n");
   printf("listed individually, extracted in memory and hashed - except Arcade .zip):\n");
   printf("  --arc-details        also print '<crc32> <size>' (crc from the archive, 0 if none)\n");
+  printf("  --arc-flush          flush each result line as it is produced (throttled ~400ms),\n");
+  printf("                       so a parent process can show live progress\n");
   printf("  --arc-calc-crc       if the archive has no crc for an entry, compute it instead of 0\n");
   printf("  --arc-ext list       only process these extensions (comma-separated, case-insensitive)\n");
   printf("  --arc-filter pats    only process entries whose name matches a wildcard pattern\n");
@@ -261,14 +264,33 @@ struct ArchiveOptions
   bool hasExt;        /* --arc-ext was given                                   */
   bool hasFilter;     /* --arc-filter was given                                */
   bool hasPriority;   /* --arc-priority was given                              */
+  bool flush;         /* --arc-flush     : flush stdout progressively (throttled) */
   std::vector<std::string> extensions; /* lowercased, leading dot, e.g. ".sfc" */
   std::vector<std::string> filters;    /* wildcard patterns (name filter)      */
   std::vector<std::string> priorities; /* wildcard patterns (priority order)   */
 
   ArchiveOptions() : details(false), calcCrc(false), first(false),
-                     hasExt(false), hasFilter(false), hasPriority(false) {}
+                     hasExt(false), hasFilter(false), hasPriority(false), flush(false) {}
 };
 static ArchiveOptions g_arc;
+
+/* --arc-flush: push each result line to a reading parent process as it is produced,
+ * instead of relying on stdio's block buffering (which, over a pipe, holds everything
+ * until ~4 KB fills or the process exits — no incremental progress). Throttled to at
+ * most one flush per ~400 ms so a huge archive of tiny, instantly-hashed entries isn't
+ * slowed by a flush (write syscall) per line. Off by default → output is byte-identical
+ * to before; only a caller that passes --arc-flush changes WHEN bytes leave the buffer. */
+static void maybe_flush_progress()
+{
+  if (!g_arc.flush) return;
+  static std::chrono::steady_clock::time_point last{};
+  auto now = std::chrono::steady_clock::now();
+  if (last.time_since_epoch().count() == 0 || now - last >= std::chrono::milliseconds(400))
+  {
+    fflush(stdout);
+    last = now;
+  }
+}
 
 static std::string to_lower(std::string s)
 {
@@ -400,6 +422,8 @@ static bool hash_archive_entry(int consoleId, const sevenzip::EntryInfo& info,
   {
     printf("%s %s\n", hashStr, info.name.c_str());
   }
+
+  maybe_flush_progress();   /* throttled push so a reader can show live progress */
 
   if (ok)
     ++(*count);
@@ -606,6 +630,7 @@ static bool hash_cue_unit(int consoleId, sevenzip::Archive* arc, const ArchiveUn
   }
 
   printf("%s %s\n", ok ? hash : "????????????????????????????????", unit.name.c_str());
+  maybe_flush_progress();   /* throttled push so a reader can show live progress */
   memfs::g_files.clear();
   if (ok) ++(*count);
   return true;
@@ -703,6 +728,8 @@ static int process_archive(int consoleId, const std::string& filePath)
     if (!arc->extract(romIndices, cb, error) && count == 0)
       fprintf(stderr, "%s\n", error.c_str());
   }
+
+  if (g_arc.flush) fflush(stdout);   /* ensure the last lines (and 100%) reach the reader now, not at exit */
 
   delete arc;
   return count;
@@ -925,6 +952,11 @@ int main(int argc, char* argv[])
     else if (strcmp(argv[argi], "--arc-details") == 0)
     {
       g_arc.details = true;
+      ++argi;
+    }
+    else if (strcmp(argv[argi], "--arc-flush") == 0)
+    {
+      g_arc.flush = true;
       ++argi;
     }
     else if (strcmp(argv[argi], "--arc-calc-crc") == 0)

@@ -183,6 +183,7 @@ These options go **before** the system key (like `-v`/`-s`):
 Option|Description
 -|-
 `--arc-details`|Also print the entry's CRC32 and size: `<hash> <crc32> <size> <name>`. The CRC32 is read from the archive (7z/zip/rar provide it; `00000000` if the format has none). The size is in bytes (64-bit).
+`--arc-flush`|Flush each result line to stdout as it is produced (throttled to ~1 flush per 400 ms), instead of relying on stdio's block buffering. Lets a parent process reading the pipe show live progress. Off by default (output content is unchanged either way).
 `--arc-calc-crc`|When the archive doesn't provide a CRC32 for an entry, compute it ourselves instead of printing `00000000` (only meaningful together with `--arc-details`).
 `--arc-ext list`|Only process entries with one of these extensions (comma-separated, case-insensitive; leading dot optional), e.g. `--arc-ext sfc,smc`. Others are ignored.
 `--arc-filter pats`|Only process entries whose **name** matches one of the wildcard patterns.
